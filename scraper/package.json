@@ -1,0 +1,12 @@
+{
+  "name": "find-hub-watcher",
+  "version": "1.0.0",
+  "description": "Reads a Find Hub share link and texts the location via Telegram.",
+  "main": "track.js",
+  "scripts": {
+    "track": "node track.js"
+  },
+  "dependencies": {
+    "puppeteer": "^22.0.0"
+  }
+}
