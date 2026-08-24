@@ -10,25 +10,15 @@ function fail(msg) {
   process.exit(1);
 }
 
-// Cookie-Editor exports extra fields Puppeteer doesn't understand
-// (partitionKey, storeId, hostOnly, etc). Strip to just what CDP needs.
 function sanitizeCookies(raw) {
   const sameSiteMap = { lax: 'Lax', strict: 'Strict', no_restriction: 'None' };
   return raw.map(c => {
     const out = {
-      name: c.name,
-      value: c.value,
-      domain: c.domain,
-      path: c.path,
-      secure: !!c.secure,
-      httpOnly: !!c.httpOnly,
+      name: c.name, value: c.value, domain: c.domain, path: c.path,
+      secure: !!c.secure, httpOnly: !!c.httpOnly,
     };
-    if (c.sameSite && sameSiteMap[c.sameSite.toLowerCase()]) {
-      out.sameSite = sameSiteMap[c.sameSite.toLowerCase()];
-    }
-    if (typeof c.expirationDate === 'number') {
-      out.expires = c.expirationDate;
-    }
+    if (c.sameSite && sameSiteMap[c.sameSite.toLowerCase()]) out.sameSite = sameSiteMap[c.sameSite.toLowerCase()];
+    if (typeof c.expirationDate === 'number') out.expires = c.expirationDate;
     return out;
   });
 }
@@ -47,22 +37,51 @@ async function extractLocation(page) {
   });
 }
 
+async function sendTelegramPhoto(buffer, caption) {
+  if (!TG_TOKEN || !TG_CHAT) return;
+  const form = new FormData();
+  form.append('chat_id', TG_CHAT);
+  form.append('caption', caption.slice(0, 1000));
+  form.append('photo', new Blob([buffer], { type: 'image/png' }), 'debug.png');
+  const res = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendPhoto`, { method: 'POST', body: form });
+  if (!res.ok) console.error('[warn] debug photo send failed:', await res.text());
+}
+
+async function notifyTelegramText(text) {
+  if (!TG_TOKEN || !TG_CHAT) return;
+  await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chat_id: TG_CHAT, text }),
+  });
+}
+
 async function getReading() {
   if (!SHARE_LINK) fail('SHARE_LINK is not set');
   if (!COOKIES_B64) fail('COOKIES_B64 is not set');
 
-  const rawCookies = JSON.parse(Buffer.from(COOKIES_B64, 'base64').toString('utf8'));
-  const cookies = sanitizeCookies(rawCookies);
+  const cookies = sanitizeCookies(JSON.parse(Buffer.from(COOKIES_B64, 'base64').toString('utf8')));
 
   const browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox'] });
   try {
     const page = await browser.newPage();
+    await page.setViewport({ width: 1200, height: 900 });
     await page.setCookie(...cookies);
     await page.goto(SHARE_LINK, { waitUntil: 'networkidle2', timeout: 60000 });
     await new Promise(r => setTimeout(r, 4000));
 
     const loc = await extractLocation(page);
-    if (!loc) fail('could not find coordinates on the page — inspect the page and update extractLocation()');
+    if (!loc) {
+      const title = await page.title();
+      const finalUrl = page.url();
+      const bodyText = await page.evaluate(() => document.body.innerText.slice(0, 500));
+      const screenshot = await page.screenshot({ fullPage: false });
+      await sendTelegramPhoto(
+        screenshot,
+        `DEBUG — no coords found\nTitle: ${title}\nURL: ${finalUrl}\nText: ${bodyText}`
+      );
+      fail('could not find coordinates — sent debug screenshot to Telegram');
+    }
     return { time: new Date().toISOString(), lat: loc.lat, lon: loc.lon };
   } finally {
     await browser.close();
@@ -73,12 +92,7 @@ async function notifyTelegram(entry) {
   if (!TG_TOKEN || !TG_CHAT) fail('TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set');
   const mapsUrl = `https://maps.google.com/?q=${entry.lat},${entry.lon}`;
   const text = `📍 ${entry.time}\n${entry.lat.toFixed(5)}, ${entry.lon.toFixed(5)}\n${mapsUrl}`;
-  const res = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: TG_CHAT, text }),
-  });
-  if (!res.ok) fail(`telegram send failed: ${await res.text()}`);
+  await notifyTelegramText(text);
 }
 
 (async () => {
