@@ -1,0 +1,29 @@
+name: Find Hub Tracker
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'   # every 10 minutes
+  workflow_dispatch: {}
+
+jobs:
+  track:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        working-directory: scraper
+        run: npm install
+
+      - name: Run tracker
+        working-directory: scraper
+        env:
+          SHARE_LINK: ${{ secrets.SHARE_LINK }}
+          COOKIES_B64: ${{ secrets.COOKIES_B64 }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: node track.js
