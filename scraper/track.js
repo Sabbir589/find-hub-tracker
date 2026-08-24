@@ -10,6 +10,29 @@ function fail(msg) {
   process.exit(1);
 }
 
+// Cookie-Editor exports extra fields Puppeteer doesn't understand
+// (partitionKey, storeId, hostOnly, etc). Strip to just what CDP needs.
+function sanitizeCookies(raw) {
+  const sameSiteMap = { lax: 'Lax', strict: 'Strict', no_restriction: 'None' };
+  return raw.map(c => {
+    const out = {
+      name: c.name,
+      value: c.value,
+      domain: c.domain,
+      path: c.path,
+      secure: !!c.secure,
+      httpOnly: !!c.httpOnly,
+    };
+    if (c.sameSite && sameSiteMap[c.sameSite.toLowerCase()]) {
+      out.sameSite = sameSiteMap[c.sameSite.toLowerCase()];
+    }
+    if (typeof c.expirationDate === 'number') {
+      out.expires = c.expirationDate;
+    }
+    return out;
+  });
+}
+
 async function extractLocation(page) {
   return await page.evaluate(() => {
     const latLngRegex = /(-?\d{1,3}\.\d{4,})[,\s]+(-?\d{1,3}\.\d{4,})/g;
@@ -28,7 +51,8 @@ async function getReading() {
   if (!SHARE_LINK) fail('SHARE_LINK is not set');
   if (!COOKIES_B64) fail('COOKIES_B64 is not set');
 
-  const cookies = JSON.parse(Buffer.from(COOKIES_B64, 'base64').toString('utf8'));
+  const rawCookies = JSON.parse(Buffer.from(COOKIES_B64, 'base64').toString('utf8'));
+  const cookies = sanitizeCookies(rawCookies);
 
   const browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox'] });
   try {
