@@ -1,7 +1,6 @@
 const puppeteer = require('puppeteer');
 
-const SHARE_LINK = process.env.SHARE_LINK; // set this secret to: https://www.google.com/android/find
-const COOKIES_B64 = process.env.COOKIES_B64;
+const SHARE_LINK = process.env.SHARE_LINK;
 const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TG_CHAT = process.env.TELEGRAM_CHAT_ID;
 
@@ -10,91 +9,178 @@ function fail(msg) {
   process.exit(1);
 }
 
-function sanitizeCookies(raw) {
-  const sameSiteMap = { lax: 'Lax', strict: 'Strict', no_restriction: 'None' };
-  return raw.map(c => {
-    const out = {
-      name: c.name, value: c.value, domain: c.domain, path: c.path,
-      secure: !!c.secure, httpOnly: !!c.httpOnly,
-    };
-    if (c.sameSite && sameSiteMap[c.sameSite.toLowerCase()]) out.sameSite = sameSiteMap[c.sameSite.toLowerCase()];
-    if (typeof c.expirationDate === 'number') out.expires = c.expirationDate;
-    return out;
-  });
-}
-
 async function extractLocation(page) {
   return await page.evaluate(() => {
-    const latLngRegex = /(-?\d{1,3}\.\d{4,})[,\s]+(-?\d{1,3}\.\d{4,})/g;
-    const scripts = Array.from(document.scripts).map(s => s.textContent).join('\n');
+    const text = document.body.innerText;
+
+    // Find latitude, longitude
+    const latLngRegex =
+      /(-?\d{1,3}\.\d{4,})[,\s]+(-?\d{1,3}\.\d{4,})/g;
+
     let match;
-    const found = [];
-    while ((match = latLngRegex.exec(scripts)) !== null) {
+
+    while ((match = latLngRegex.exec(text)) !== null) {
       const lat = parseFloat(match[1]);
       const lon = parseFloat(match[2]);
-      if (Math.abs(lat) <= 90 && Math.abs(lon) <= 180) found.push({ lat, lon });
+
+      if (
+        Math.abs(lat) <= 90 &&
+        Math.abs(lon) <= 180
+      ) {
+        return {
+          lat,
+          lon
+        };
+      }
     }
-    return found[0] || null;
+
+    return null;
   });
 }
 
-async function sendTelegramPhoto(buffer, caption) {
-  if (!TG_TOKEN || !TG_CHAT) return;
-  const form = new FormData();
-  form.append('chat_id', TG_CHAT);
-  form.append('caption', caption.slice(0, 1000));
-  form.append('photo', new Blob([buffer], { type: 'image/png' }), 'debug.png');
-  const res = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendPhoto`, { method: 'POST', body: form });
-  if (!res.ok) console.error('[warn] debug photo send failed:', await res.text());
+async function extractTime(page) {
+  return await page.evaluate(() => {
+    const text = document.body.innerText;
+
+    const match = text.match(
+      /Last seen\s+([A-Za-z]+\s+\d{1,2},\s+\d{4})\s+at\s+([0-9:]+\s*[AP]M\s+UTC[+-]\d+)/i
+    );
+
+    if (!match) return null;
+
+    return {
+      date: match[1],
+      time: match[2]
+    };
+  });
 }
 
-async function notifyTelegramText(text) {
-  if (!TG_TOKEN || !TG_CHAT) return;
-  await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: TG_CHAT, text }),
-  });
+async function sendTelegram(text) {
+  if (!TG_TOKEN || !TG_CHAT) {
+    fail('Telegram credentials are missing');
+  }
+
+  const res = await fetch(
+    `https://api.telegram.org/bot${TG_TOKEN}/sendMessage`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        chat_id: TG_CHAT,
+        text
+      })
+    }
+  );
+
+  if (!res.ok) {
+    console.error(await res.text());
+  }
 }
 
 async function getReading() {
-  if (!SHARE_LINK) fail('SHARE_LINK is not set');
-  if (!COOKIES_B64) fail('COOKIES_B64 is not set');
+  if (!SHARE_LINK) {
+    fail('SHARE_LINK is not set');
+  }
 
-  const cookies = sanitizeCookies(JSON.parse(Buffer.from(COOKIES_B64, 'base64').toString('utf8')));
+  const browser = await puppeteer.launch({
+    headless: true,
+    args: ['--no-sandbox']
+  });
 
-  const browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox'] });
   try {
     const page = await browser.newPage();
-    await page.setViewport({ width: 1300, height: 950 });
-    await page.setCookie(...cookies);
-    await page.goto(SHARE_LINK, { waitUntil: 'networkidle2', timeout: 60000 });
-    await new Promise(r => setTimeout(r, 6000)); // dashboard + map take longer to settle
 
-    const loc = await extractLocation(page);
-    if (!loc) {
-      const title = await page.title();
-      const finalUrl = page.url();
-      const bodyText = await page.evaluate(() => document.body.innerText.slice(0, 500));
-      const screenshot = await page.screenshot({ fullPage: false });
-      await sendTelegramPhoto(screenshot, `DEBUG — no coords found\nTitle: ${title}\nURL: ${finalUrl}\nText: ${bodyText}`);
-      fail('could not find coordinates — sent debug screenshot to Telegram');
+    await page.setViewport({
+      width: 1300,
+      height: 950
+    });
+
+    console.log('[info] Opening Find Hub...');
+
+    await page.goto(SHARE_LINK, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60000
+    });
+
+    // Give Find Hub time to render the map/location
+    await new Promise(resolve => setTimeout(resolve, 10000));
+
+    console.log('[info] Page URL:', page.url());
+    console.log('[info] Title:', await page.title());
+
+    const bodyText = await page.evaluate(
+      () => document.body.innerText
+    );
+
+    console.log('[info] Page text:');
+    console.log(bodyText.slice(0, 3000));
+
+    // Check if Google redirected us to login
+    if (
+      page.url().includes('accounts.google.com') ||
+      /sign in/i.test(bodyText)
+    ) {
+      const screenshot = await page.screenshot({
+        fullPage: false
+      });
+
+      require('fs').writeFileSync(
+        'debug-login.png',
+        screenshot
+      );
+
+      fail(
+        'Google Sign-in page detected. The share link requires authentication.'
+      );
     }
-    return { time: new Date().toISOString(), lat: loc.lat, lon: loc.lon };
+
+    const location = await extractLocation(page);
+    const timestamp = await extractTime(page);
+
+    if (!location) {
+      await page.screenshot({
+        path: 'debug-no-coordinates.png',
+        fullPage: false
+      });
+
+      fail('Coordinates were not found.');
+    }
+
+    return {
+      ...location,
+      ...timestamp
+    };
+
   } finally {
     await browser.close();
   }
 }
 
-async function notifyTelegram(entry) {
-  if (!TG_TOKEN || !TG_CHAT) fail('TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set');
-  const mapsUrl = `https://maps.google.com/?q=${entry.lat},${entry.lon}`;
-  const text = `📍 ${entry.time}\n${entry.lat.toFixed(5)}, ${entry.lon.toFixed(5)}\n${mapsUrl}`;
-  await notifyTelegramText(text);
+async function main() {
+  const entry = await getReading();
+
+  console.log('[OK]', entry);
+
+  const mapsUrl =
+    `https://www.google.com/maps?q=${entry.lat},${entry.lon}`;
+
+  const text =
+`📍 MiLi Tag Location
+
+📅 ${entry.date || 'Unknown'}
+🕐 ${entry.time || 'Unknown'}
+
+🌐 Latitude: ${entry.lat}
+🌐 Longitude: ${entry.lon}
+
+🗺️ ${mapsUrl}`;
+
+  await sendTelegram(text);
 }
 
-(async () => {
-  const entry = await getReading();
-  await notifyTelegram(entry);
-  console.log('[ok]', entry);
-})();
+main().catch(err => {
+  console.error(err);
+  process.exit(1);
+});
