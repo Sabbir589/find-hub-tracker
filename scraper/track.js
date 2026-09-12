@@ -1,6 +1,6 @@
 const puppeteer = require('puppeteer');
 
-const SHARE_LINK = process.env.SHARE_LINK;
+const SHARE_LINK = process.env.SHARE_LINK; // set this secret to: https://www.google.com/android/find
 const COOKIES_B64 = process.env.COOKIES_B64;
 const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TG_CHAT = process.env.TELEGRAM_CHAT_ID;
@@ -28,12 +28,13 @@ async function extractLocation(page) {
     const latLngRegex = /(-?\d{1,3}\.\d{4,})[,\s]+(-?\d{1,3}\.\d{4,})/g;
     const scripts = Array.from(document.scripts).map(s => s.textContent).join('\n');
     let match;
+    const found = [];
     while ((match = latLngRegex.exec(scripts)) !== null) {
       const lat = parseFloat(match[1]);
       const lon = parseFloat(match[2]);
-      if (Math.abs(lat) <= 90 && Math.abs(lon) <= 180) return { lat, lon };
+      if (Math.abs(lat) <= 90 && Math.abs(lon) <= 180) found.push({ lat, lon });
     }
-    return null;
+    return found[0] || null;
   });
 }
 
@@ -65,10 +66,10 @@ async function getReading() {
   const browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox'] });
   try {
     const page = await browser.newPage();
-    await page.setViewport({ width: 1200, height: 900 });
+    await page.setViewport({ width: 1300, height: 950 });
     await page.setCookie(...cookies);
     await page.goto(SHARE_LINK, { waitUntil: 'networkidle2', timeout: 60000 });
-    await new Promise(r => setTimeout(r, 4000));
+    await new Promise(r => setTimeout(r, 6000)); // dashboard + map take longer to settle
 
     const loc = await extractLocation(page);
     if (!loc) {
@@ -76,10 +77,7 @@ async function getReading() {
       const finalUrl = page.url();
       const bodyText = await page.evaluate(() => document.body.innerText.slice(0, 500));
       const screenshot = await page.screenshot({ fullPage: false });
-      await sendTelegramPhoto(
-        screenshot,
-        `DEBUG — no coords found\nTitle: ${title}\nURL: ${finalUrl}\nText: ${bodyText}`
-      );
+      await sendTelegramPhoto(screenshot, `DEBUG — no coords found\nTitle: ${title}\nURL: ${finalUrl}\nText: ${bodyText}`);
       fail('could not find coordinates — sent debug screenshot to Telegram');
     }
     return { time: new Date().toISOString(), lat: loc.lat, lon: loc.lon };
